@@ -1,93 +1,55 @@
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload
-
-from app.database import async_session_maker
-from sqlalchemy import update as sqlalchemy_update, delete as sqlalchemy_delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import HTTPException
 
 
 class BaseDAO:
     model = None
 
     @classmethod
-    async def find_all(cls, **filter_by):
-        async with async_session_maker() as session:
-            query = select(cls.model)
-
-            # Применяем фильтры, если они переданы
-            if filter_by and any(value is not None for value in filter_by.values()):
-                query = query.filter_by(**filter_by)
-
-            result = await session.execute(query)
-            return result.scalars().all()
-    # @classmethod
-    # async def find_all(cls, **filter_by):
-    #     async with async_session_maker() as session:
-    #         query = (
-    #             select(cls.model)
-    #             .options(joinedload(cls.model.fields))  # Жадная загрузка поля `fields`
-    #             .filter_by(**filter_by)
-    #         )
-    #         result = await session.execute(query)
-    #         return result.scalars().all()
+    async def find_all(cls, session: AsyncSession, **filter_by):
+        query = select(cls.model)
+        if filter_by:
+            query = query.filter_by(**filter_by)
+        result = await session.execute(query)
+        return result.scalars().all()
 
     @classmethod
-    async def find_one_or_none_by_id(cls, data_id: int):
-        async with async_session_maker() as session:
-            query = select(cls.model).filter_by(id=data_id)
-            result = await session.execute(query)
-            return result.unique().scalar_one_or_none()  # Добавлен вызов .unique()
+    async def find_one_or_none_by_id(cls, session: AsyncSession, data_id: int):
+        result = await session.execute(select(cls.model).filter_by(id=data_id))
+        entity = result.scalar_one_or_none()
+        if not entity:
+            raise HTTPException(status_code=404, detail="Entity not found")
+        return entity
 
     @classmethod
-    async def find_one_or_none(cls, **filter_by):
-        async with async_session_maker() as session:
-            query = select(cls.model).filter_by(**filter_by)
-            result = await session.execute(query)
-            return result.scalar_one_or_none()
+    async def find_one_or_none(cls, session: AsyncSession, **filter_by):
+        result = await session.execute(select(cls.model).filter_by(**filter_by))
+        return result.scalar_one_or_none()
 
     @classmethod
-    async def add(cls, **values):
-        async with async_session_maker() as session:
-            async with session.begin():
-                new_instance = cls.model(**values)
-                session.add(new_instance)
-                try:
-                    await session.commit()
-                except SQLAlchemyError as e:
-                    await session.rollback()
-                    raise e
-                return new_instance
+    async def add(cls, session: AsyncSession, **values):
+        new_instance = cls.model(**values)
+        session.add(new_instance)
+        try:
+            await session.commit()
+        except SQLAlchemyError as e:
+            await session.rollback()
+            raise HTTPException(status_code=400, detail=str(e))
+        return new_instance
 
     @classmethod
-    async def update(cls, filter_by, **values):
-        async with async_session_maker() as session:
-            async with session.begin():
-                query = (
-                    sqlalchemy_update(cls.model)
-                    .where(*[getattr(cls.model, k) == v for k, v in filter_by.items()])
-                    .values(**values)
-                    .execution_options(synchronize_session="fetch")
-                )
-                result = await session.execute(query)
-                try:
-                    await session.commit()
-                except SQLAlchemyError as e:
-                    await session.rollback()
-                    raise e
-                return result.rowcount
+    async def update(cls, session: AsyncSession, entity, **values):
+        for key, value in values.items():
+            setattr(entity, key, value)
+        session.add(entity)
+        await session.commit()
+        return entity
 
     @classmethod
-    async def delete(cls, delete_all: bool = False, **filter_by):
-        if not delete_all and not filter_by:
-            raise ValueError("Необходимо указать хотя бы один параметр для удаления.")
-
-        async with async_session_maker() as session:
-            async with session.begin():
-                query = sqlalchemy_delete(cls.model).filter_by(**filter_by)
-                result = await session.execute(query)
-                try:
-                    await session.commit()
-                except SQLAlchemyError as e:
-                    await session.rollback()
-                    raise e
-                return result.rowcount
+    async def delete(cls, session: AsyncSession, entity):
+        await session.delete(entity)
+        await session.commit()
+        return {"message": "Entity deleted"}

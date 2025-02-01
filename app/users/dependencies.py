@@ -1,12 +1,12 @@
 from fastapi import Request, HTTPException, status, Depends
 from jose import jwt, JWTError
 from datetime import datetime, timezone
-
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload, joinedload
 from sqlalchemy import select
 
 from app.config import get_auth_data
-from app.database import async_session_maker
+from app.database import get_db_session
 from app.exceptions import TokenExpiredException, NoJwtException, NoUserIdException, ForbiddenException
 from app.users.auth import create_access_token
 from app.users.dao import UsersDAO
@@ -28,7 +28,10 @@ def get_token(request: Request, token_type: str):
     return token
 
 
-async def refresh_access_token(request: Request):
+async def refresh_access_token(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session)
+):
     token = get_token(request, 'refresh')
     try:
         auth_data = get_auth_data()
@@ -44,7 +47,7 @@ async def refresh_access_token(request: Request):
     if not user_id:
         raise NoUserIdException(detail='No user ID in token')
 
-    user = await UsersDAO.find_one_or_none_by_id(int(user_id))
+    user = await UsersDAO.find_one_or_none_by_id(session, int(user_id))
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='User not found')
 
@@ -52,7 +55,10 @@ async def refresh_access_token(request: Request):
     return {"access_token": new_access_token}
 
 
-async def get_current_user(request: Request):
+async def get_current_user(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session)
+) -> User:
     token = get_token(request, 'access')
     try:
         auth_data = get_auth_data()
@@ -69,40 +75,43 @@ async def get_current_user(request: Request):
         raise NoUserIdException(detail='No user ID in token')
 
     # Загрузка пользователя с жадной загрузкой его ролей
-    async with async_session_maker() as session:
-        query = select(User).options(selectinload(User.roles)).where(User.id == int(user_id))
-        result = await session.execute(query)
-        user = result.scalar_one_or_none()
+    query = select(User).options(selectinload(User.roles)).where(User.id == int(user_id))
+    result = await session.execute(query)
+    user = result.scalar_one_or_none()
 
-        if not user:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='User not found')
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='User not found')
 
     return user
 
 
-async def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:
-    async with async_session_maker() as session:
-        query = select(User).options(
-            joinedload(User.roles).joinedload(UserRoles.role)
-        ).where(User.id == current_user.id)
-        result = await session.execute(query)
-        user = result.unique().scalar_one_or_none()
+async def get_current_admin_user(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session)
+) -> User:
+    query = select(User).options(
+        joinedload(User.roles).joinedload(UserRoles.role)
+    ).where(User.id == current_user.id)
+    result = await session.execute(query)
+    user = result.unique().scalar_one_or_none()
 
-        if not user or not user.is_admin:
-            raise HTTPException(status_code=403, detail="Access denied")
+    if not user or not user.is_admin:
+        raise HTTPException(status_code=403, detail="Access denied")
 
-        return user
+    return user
 
 
-async def get_current_farmer_user(current_user: User = Depends(get_current_user)) -> User:
-    async with async_session_maker() as session:
-        query = select(User).options(
-            joinedload(User.roles).joinedload(UserRoles.role)
-        ).where(User.id == current_user.id)
-        result = await session.execute(query)
-        user = result.unique().scalar_one_or_none()
+async def get_current_farmer_user(
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session)
+) -> User:
+    query = select(User).options(
+        joinedload(User.roles).joinedload(UserRoles.role)
+    ).where(User.id == current_user.id)
+    result = await session.execute(query)
+    user = result.unique().scalar_one_or_none()
 
-        if not user or not any(role.name == 'farmer' for role in user.roles):
-            raise HTTPException(status_code=403, detail="Access denied")
+    if not user or not any(role.name == 'farmer' for role in user.roles):
+        raise HTTPException(status_code=403, detail="Access denied")
 
-        return user
+    return user
